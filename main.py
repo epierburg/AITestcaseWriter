@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -12,6 +13,20 @@ from github_client import clone_repo
 from validator import load_validator_config
 
 app = Flask(__name__)
+
+def _sanitize_path_value(value: str | None, default: str) -> str:
+    if not value:
+        return default
+
+    cleaned = value.strip().replace("\\", "/")
+    cleaned = cleaned.replace("\r", "").replace("\n", "")
+    cleaned = re.sub(r"/{2,}", "/", cleaned)
+
+    match = re.match(r"^(.+?\.(?:ya?ml|json))", cleaned, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    return cleaned or default
 
 @app.route("/", methods=["GET"])
 def index():
@@ -48,8 +63,8 @@ def ui():
         print("/ui POST received")
         example_repo_url = request.form.get("example_repo_url")
         validator_repo_url = request.form.get("validator_repo_url")
-        validator_config_file = request.form.get("validator_config_file", "validator.yaml")
-        output_location = request.form.get("output_location", "generated_testcases.md")
+        validator_config_file = _sanitize_path_value(request.form.get("validator_config_file"), "validator.yaml")
+        output_location = _sanitize_path_value(request.form.get("output_location"), "generated_testcases.md")
         github_token = request.form.get("github_token")
         excel_file = request.files.get("excel_file")
         excel_directive = request.form.get("excel_directive", "").strip()
@@ -82,7 +97,12 @@ def ui():
             print("Cloning validator repo", validator_repo_url)
             validator_repo_dir = temp_dir / "validator_repo"
             validator_repo_dir.mkdir(parents=True, exist_ok=True)
-            clone_repo(validator_repo_url, github_token, validator_repo_dir)
+            clone_repo(
+                validator_repo_url,
+                github_token,
+                validator_repo_dir,
+                sparse_paths=[validator_config_file],
+            )
             print("Validator repo cloned to", validator_repo_dir)
             validator_config = load_validator_config(validator_repo_dir / validator_config_file)
             print("Loaded validator config from", validator_config_file)
@@ -92,7 +112,7 @@ def ui():
             if example_repo_url:
                 example_repo_dir = temp_dir / "example_repo"
                 example_repo_dir.mkdir(parents=True, exist_ok=True)
-                clone_repo(example_repo_url, github_token, example_repo_dir)
+                clone_repo(example_repo_url, github_token, example_repo_dir, ignore_dirs=["testdata"])
 
             if excel_file:
                 print("Parsing Excel file")
@@ -246,8 +266,14 @@ def ui():
 def generate_testcases():
     # Support both old and new parameter names for backward compatibility
     validator_repo_url = request.form.get("validator_repo_url") or request.form.get("github_repo_url")
-    validator_config_file = request.form.get("validator_config_file", "validator.yaml") or request.form.get("validator_path", "validator.yaml")
-    output_location = request.form.get("output_location", "generated_testcases.md") or request.form.get("testcase_output_path", "generated_testcases.md")
+    validator_config_file = _sanitize_path_value(
+        request.form.get("validator_config_file") or request.form.get("validator_path"),
+        "validator.yaml",
+    )
+    output_location = _sanitize_path_value(
+        request.form.get("output_location") or request.form.get("testcase_output_path"),
+        "generated_testcases.md",
+    )
     example_repo_url = request.form.get("example_repo_url")
     github_token = request.form.get("github_token")
     excel_file = request.files.get("excel_file")
@@ -266,7 +292,12 @@ def generate_testcases():
         # Clone validator repo
         validator_repo_dir = temp_dir / "validator_repo"
         validator_repo_dir.mkdir(parents=True, exist_ok=True)
-        clone_repo(validator_repo_url, github_token, validator_repo_dir)
+        clone_repo(
+            validator_repo_url,
+            github_token,
+            validator_repo_dir,
+            sparse_paths=[validator_config_file],
+        )
         validator_config = load_validator_config(validator_repo_dir / validator_config_file)
 
         # Clone example repo if provided
@@ -274,7 +305,7 @@ def generate_testcases():
         if example_repo_url:
             example_repo_dir = temp_dir / "example_repo"
             example_repo_dir.mkdir(parents=True, exist_ok=True)
-            clone_repo(example_repo_url, github_token, example_repo_dir)
+            clone_repo(example_repo_url, github_token, example_repo_dir, ignore_dirs=["testdata"])
 
         if excel_file:
             file_bytes = excel_file.read()
