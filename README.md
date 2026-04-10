@@ -27,10 +27,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-3. Call the API from any UI:
-
-- POST `/generate-testcases`
-- Send `github_repo_url`, `validator_path`, `testcase_output_path`, and file upload `excel_file`
+3. Access the web interface at `http://localhost:8000/ui` or use the API.
 
 ## Environment Variables
 
@@ -46,9 +43,39 @@ pip install openai
 
 - Then set `OPENAI_API_KEY` before starting the service.
 
-## Example Request
+## Web Interface
 
-Use a form-based upload to send an Excel file and GitHub repository URL.
+Visit `http://localhost:8000/ui` for a user-friendly form with:
+
+- **Example Framework Repo URL** (optional): GitHub repo with working test cases for reference.
+- **Testcase Validator Repo URL**: GitHub repo with validation rules.
+- **Validator Config File**: Select or enter the YAML config file (e.g., validator.yaml).
+- **Output Location**: Path in the validator repo for saving generated test cases.
+- **GitHub Token** (optional): For private repos.
+- **Excel Spec Sheet**: Upload Excel file with requirements.
+- **Excel Directive**: Instructions on how to use the Excel data.
+- **Single Prompt Input**: Additional guidance for generation.
+- **Requirements Text**: Manual entry as alternative to Excel.
+
+## API Endpoints
+
+- `GET /` - Homepage with links
+- `GET /health` - Health check
+- `GET /ui` - Web interface
+- `POST /generate-testcases` - API for programmatic access
+
+### POST /generate-testcases Parameters
+
+- `github_repo_url` (string): URL of the repo with validator config
+- `validator_path` (optional): Path to config file (default: validator.yaml)
+- `testcase_output_path` (optional): Output path (default: generated_testcases.md)
+- `github_token` (optional): Auth token
+- `excel_file` (file): Excel upload
+
+## Notes
+
+- The service is designed as a reusable connector. External UIs can integrate with it through standard HTTP calls.
+- If no OpenAI key is configured, a safe local stub generates structured test-case output.
 
 ## Notes
 
