@@ -1,15 +1,19 @@
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from flask import Flask, jsonify, request
 
 from agent import generate_testcases as generate_testcases_from_source, is_openai_enabled
 from excel_processor import parse_excel
-from github_client import clone_repo
+from github_client import clone_repo, _run_git, _build_authenticated_url
 from validator import load_validator_config
 
 app = Flask(__name__)
@@ -47,6 +51,7 @@ def index():
             <li>validator_path (optional, default: validator.yaml)</li>
             <li>testcase_output_path (optional, default: generated_testcases.md)</li>
             <li>github_token (optional)</li>
+            <li>example_repo_token (optional)</li>
             <li>excel_file (file upload)</li>
         </ul>
     </body>
@@ -66,6 +71,7 @@ def ui():
         validator_config_file = _sanitize_path_value(request.form.get("validator_config_file"), "validator.yaml")
         output_location = _sanitize_path_value(request.form.get("output_location"), "generated_testcases.md")
         github_token = request.form.get("github_token")
+        example_repo_token = request.form.get("example_repo_token")
         excel_file = request.files.get("excel_file")
         excel_directive = request.form.get("excel_directive", "").strip()
         single_prompt = request.form.get("single_prompt", "").strip()
@@ -101,9 +107,14 @@ def ui():
                 validator_repo_url,
                 github_token,
                 validator_repo_dir,
-                sparse_paths=[validator_config_file],
+                sparse_paths=[validator_config_file, output_location],
             )
             print("Validator repo cloned to", validator_repo_dir)
+            current_branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=validator_repo_dir).stdout.strip()
+            if current_branch == "HEAD":
+                remote_head = _run_git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=validator_repo_dir).stdout.strip()
+                current_branch = remote_head.split("/", 1)[-1]
+            print("Validator repo current branch:", current_branch)
             validator_config = load_validator_config(validator_repo_dir / validator_config_file)
             print("Loaded validator config from", validator_config_file)
 
@@ -112,7 +123,7 @@ def ui():
             if example_repo_url:
                 example_repo_dir = temp_dir / "example_repo"
                 example_repo_dir.mkdir(parents=True, exist_ok=True)
-                clone_repo(example_repo_url, github_token, example_repo_dir, ignore_dirs=["testdata"])
+                clone_repo(example_repo_url, example_repo_token, example_repo_dir, ignore_dirs=["testdata"])
 
             if excel_file:
                 print("Parsing Excel file")
@@ -143,6 +154,27 @@ def ui():
             generated_file.parent.mkdir(parents=True, exist_ok=True)
             generated_file.write_text(output_text, encoding="utf-8")
 
+            # Commit and push the generated file back to the validator repo
+            push_status = None
+            if github_token:
+                try:
+                    _run_git(["sparse-checkout", "disable"], cwd=validator_repo_dir)
+                    _run_git(["checkout", "HEAD"], cwd=validator_repo_dir)
+                    _run_git(["add", str(generated_file.relative_to(validator_repo_dir))], cwd=validator_repo_dir)
+                    _run_git(["commit", "-m", f"Add generated test cases: {output_location}"], cwd=validator_repo_dir)
+                    authenticated_url = _build_authenticated_url(validator_repo_url, github_token)
+                    push_result = _run_git(
+                        ["push", authenticated_url, f"HEAD:{current_branch}"],
+                        cwd=validator_repo_dir,
+                    )
+                    push_status = push_result.stdout.strip() or push_result.stderr.strip()
+                    print("Pushed generated file to validator repo", push_status)
+                except subprocess.CalledProcessError as push_exc:
+                    print(f"Failed to push to repo: {push_exc}")
+                    print("stdout:", push_exc.stdout)
+                    print("stderr:", push_exc.stderr)
+                    push_status = f"push failed: {push_exc.stderr.strip() or push_exc.stdout.strip()}"
+
             return f"""
             <html>
             <head><title>Generated Test Cases</title>
@@ -159,6 +191,7 @@ def ui():
                 <p>Generated path: {generated_file.relative_to(validator_repo_dir)}</p>
                 <p>Source rows: {len(requirements)}</p>
                 <p>Number of test cases: {num_test_cases}</p>
+                <p>Push status: {push_status or 'no push attempted'}</p>
                 <h2>Test Case Tracker</h2>
                 <ul>
                 {"".join(f"<li>{name} - Done <span style='color: green;'>✓</span></li>" for name in test_case_names)}
@@ -225,8 +258,13 @@ def ui():
             </div>
             <div class="form-group">
                 <label>GitHub Token (optional):</label>
-                <small>Personal access token for private repos or higher rate limits.</small><br>
+                <small>Personal access token for private validator repo or higher rate limits.</small><br>
                 <input type="text" name="github_token">
+            </div>
+            <div class="form-group">
+                <label>Example Repo Token (optional):</label>
+                <small>Personal access token for private example repo.</small><br>
+                <input type="text" name="example_repo_token">
             </div>
             <div class="form-group">
                 <label>Upload Excel Spec Sheet:</label>
@@ -276,6 +314,7 @@ def generate_testcases():
     )
     example_repo_url = request.form.get("example_repo_url")
     github_token = request.form.get("github_token")
+    example_repo_token = request.form.get("example_repo_token")
     excel_file = request.files.get("excel_file")
     excel_directive = request.form.get("excel_directive", "").strip()
     single_prompt = request.form.get("single_prompt", "").strip()
@@ -296,7 +335,7 @@ def generate_testcases():
             validator_repo_url,
             github_token,
             validator_repo_dir,
-            sparse_paths=[validator_config_file],
+            sparse_paths=[validator_config_file, output_location],
         )
         validator_config = load_validator_config(validator_repo_dir / validator_config_file)
 
@@ -305,7 +344,7 @@ def generate_testcases():
         if example_repo_url:
             example_repo_dir = temp_dir / "example_repo"
             example_repo_dir.mkdir(parents=True, exist_ok=True)
-            clone_repo(example_repo_url, github_token, example_repo_dir, ignore_dirs=["testdata"])
+            clone_repo(example_repo_url, example_repo_token, example_repo_dir, ignore_dirs=["testdata"])
 
         if excel_file:
             file_bytes = excel_file.read()
@@ -325,6 +364,22 @@ def generate_testcases():
         generated_file = validator_repo_dir / output_location
         generated_file.parent.mkdir(parents=True, exist_ok=True)
         generated_file.write_text(output_text, encoding="utf-8")
+
+        # Commit and push the generated file back to the validator repo
+        if github_token:
+            try:
+                _run_git(["sparse-checkout", "disable"], cwd=validator_repo_dir)
+                _run_git(["checkout", "HEAD"], cwd=validator_repo_dir)
+                _run_git(["add", str(generated_file.relative_to(validator_repo_dir))], cwd=validator_repo_dir)
+                _run_git(["commit", "-m", f"Add generated test cases: {output_location}"], cwd=validator_repo_dir)
+                authenticated_url = _build_authenticated_url(validator_repo_url, github_token)
+                _run_git(["push", authenticated_url, "HEAD"], cwd=validator_repo_dir)
+                print("Pushed generated file to validator repo")
+            except subprocess.CalledProcessError as push_exc:
+                print(f"Failed to push to repo: {push_exc}")
+                print("stdout:", push_exc.stdout)
+                print("stderr:", push_exc.stderr)
+                # Continue anyway
 
         return jsonify({
             "status": "success",
